@@ -1,56 +1,49 @@
-//! Provides a RESTful web server managing some Todos.
-//!
-//! API will be:
-//!
-//! - `GET /todos`: return a JSON list of Todos.
-//! - `POST /todos`: create a new Todo.
-//! - `PATCH /todos/:id`: update a specific Todo.
-//! - `DELETE /todos/:id`: delete a specific Todo.
-//! - `GET /kys`: Exit the application (KEKW)
-//!
-//! Run with
-//!
-//! ```not_rust
-//! cargo run -p example-todos
-//! ```
-
 use axum::{
     error_handling::HandleErrorLayer,
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Multipart, Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, patch},
+    routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use tracing::info;
+
 use std::{
     collections::HashMap,
+    path::Path as P,
     sync::{Arc, RwLock},
     time::Duration,
 };
 use tower::{BoxError, ServiceBuilder};
-use tower_http::trace::TraceLayer;
+use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
+
+// TODO: Develop an actual client app so that you don't have to send all requests via curl.
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "example_todos=debug,tower_http=debug".into()),
+                .unwrap_or_else(|_| "spfiler=debug,tower_http=debug".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let db = Db::default();
-
     // Compose the routes
+    // TODO: Download functionality
+    // TODO: Deleting files from ID
+    // TODO: Secure downloads/uploads via HTTPS protocol
     let app = Router::new()
         .route("/kys", get(exit_app))
-        .route("/todos", get(todos_index).post(todos_create))
-        .route("/todos/:id", patch(todos_update).delete(todos_delete))
+        .route("/register", get(register_id))
+        .route("/list/:registered_id", get(list_files))
+        .route("/upload/:id/:filename", post(upload_file))
         // Add middleware to all routes
+        .layer(DefaultBodyLimit::disable())
+        .layer(RequestBodyLimitLayer::new(1 * 1024 * 1024 * 1024))
         .layer(
             ServiceBuilder::new()
                 .layer(HandleErrorLayer::new(|error: BoxError| async move {
@@ -67,9 +60,9 @@ async fn main() {
                 .layer(TraceLayer::new_for_http())
                 .into_inner(),
         )
-        .with_state(db);
+        .with_state(FileCoordinator::new_async());
 
-    let listener = tokio::net::TcpListener::bind("192.168.50.116:3000")
+    let listener = tokio::net::TcpListener::bind("192.168.50.116:80")
         .await
         .unwrap();
     tracing::debug!("listening on {}", listener.local_addr().unwrap());
@@ -88,94 +81,135 @@ fn do_exit() {
 }
 
 async fn exit_app() -> impl IntoResponse {
-    tokio::spawn( async move { do_exit(); });
-    (StatusCode::OK, Json(ExitResponse {
-        response: "Yeah, it wasn't all that fun anyway...".to_owned(),
+    tokio::spawn(async move {
+        do_exit();
+    });
+    (
+        StatusCode::OK,
+        Json(ExitResponse {
+            response: "Yeah, it wasn't all that fun anyway...".to_owned(),
+        }),
+    )
+}
+
+#[derive(Serialize, Debug)]
+pub struct RegisteredResponse {
+    pub id: String,
+    pub message: String,
+}
+
+async fn register_id(State(files): State<Files>) -> impl IntoResponse {
+    let registered_id = Uuid::new_v4();
+    files.write().unwrap().list.insert(registered_id, vec![]);
+
+    (StatusCode::CREATED, Json(RegisteredResponse {
+        id: registered_id.to_string(),
+        message: "Your new file sharing ID has been registered! Do NOT lose this ID, it is your key to sharing files via this app!".to_owned(),
     }))
 }
 
-// The query parameters for todos index
-#[derive(Debug, Deserialize, Default)]
-pub struct Pagination {
-    pub offset: Option<usize>,
-    pub limit: Option<usize>,
+#[derive(Deserialize, Serialize, Debug)]
+pub struct ListFilesResponse {
+    message: String,
+    files: Option<Vec<String>>,
 }
 
-async fn todos_index(
-    pagination: Option<Query<Pagination>>,
-    State(db): State<Db>,
+async fn list_files(
+    Path(registered_id): Path<Uuid>,
+    State(files): State<Files>,
 ) -> impl IntoResponse {
-    let todos = db.read().unwrap();
-
-    let Query(pagination) = pagination.unwrap_or_default();
-
-    let todos = todos
-        .values()
-        .skip(pagination.offset.unwrap_or(0))
-        .take(pagination.limit.unwrap_or(usize::MAX))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    Json(todos)
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateTodo {
-    text: String,
-}
-
-async fn todos_create(State(db): State<Db>, Json(input): Json<CreateTodo>) -> impl IntoResponse {
-    let todo = Todo {
-        id: Uuid::new_v4(),
-        text: input.text,
-        completed: false,
-    };
-
-    db.write().unwrap().insert(todo.id, todo.clone());
-
-    (StatusCode::CREATED, Json(todo))
-}
-
-#[derive(Debug, Deserialize)]
-struct UpdateTodo {
-    text: Option<String>,
-    completed: Option<bool>,
-}
-
-async fn todos_update(
-    Path(id): Path<Uuid>,
-    State(db): State<Db>,
-    Json(input): Json<UpdateTodo>,
-) -> Result<impl IntoResponse, StatusCode> {
-    let mut todo = db
+    let maybe_files = files
         .read()
         .unwrap()
-        .get(&id)
-        .cloned()
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .list
+        .get(&registered_id)
+        .map(|o| o.clone());
 
-    if let Some(text) = input.text {
-        todo.text = text;
-    }
-
-    if let Some(completed) = input.completed {
-        todo.completed = completed;
-    }
-
-    db.write().unwrap().insert(todo.id, todo.clone());
-
-    Ok(Json(todo))
-}
-
-async fn todos_delete(Path(id): Path<Uuid>, State(db): State<Db>) -> impl IntoResponse {
-    if db.write().unwrap().remove(&id).is_some() {
-        StatusCode::NO_CONTENT
-    } else {
-        StatusCode::NOT_FOUND
+    match maybe_files {
+        None => (
+            StatusCode::BAD_REQUEST,
+            Json(ListFilesResponse {
+                message: "Sorry, no such ID has been registered yet!".to_owned(),
+                files: None,
+            }),
+        ),
+        Some(file_vec) => (
+            StatusCode::BAD_REQUEST,
+            Json(ListFilesResponse {
+                message: format!("Found files for id {}!", registered_id.to_string()),
+                files: Some(file_vec),
+            }),
+        ),
     }
 }
 
-type Db = Arc<RwLock<HashMap<Uuid, Todo>>>;
+// TODO: Sanitize uploaded file names, make sure names are sane
+// TODO: Rethink the URL structure in order to not expose the file names in the URL for security
+// TODO: Maybe handle cases if the connection is dropped and the file ends up being only partially uploaded?
+// TODO: Could also explore streaming files and not uploading them in a single operation (for larger files).
+async fn upload_file(
+    Path((id, filename)): Path<(Uuid, String)>,
+    State(files): State<Files>,
+    mut mp: Multipart,
+) -> (StatusCode, String) {
+    if files.read().unwrap().list.get(&id).is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "ERROR: No such ID has been registered, can't upload any files!".to_owned(),
+        );
+    }
+
+    while let Some(field) = mp.next_field().await.unwrap() {
+        let prefix = files.read().unwrap().storage_prefix.clone();
+        let name = field.name().unwrap().to_string();
+        let filename_async = field.file_name().unwrap().to_string();
+
+        if name == "filename".to_string() && filename_async == filename {
+            info!("UPLOADING: prefix: `{}`, name: `{}`, filename in field: `{}`, filename in request: `{}`.", &prefix, &name, &filename_async, &filename);
+            let data = field.bytes().await.unwrap();
+
+            let dirpath = P::new(&prefix).join(&id.to_string());
+            if !tokio::fs::try_exists(&dirpath).await.unwrap() {
+                tokio::fs::create_dir_all(&dirpath).await.unwrap();
+            }
+
+            match tokio::fs::write(dirpath.join(&filename), data).await {
+                Ok(()) => {
+                    let mut coord = files.write().unwrap();
+                    let id_files = coord.list.get_mut(&id).unwrap();
+                    id_files.push(filename);
+                    return (StatusCode::OK, "File uploaded!".to_owned());
+                }
+                Err(e) => return (
+                    StatusCode::BAD_GATEWAY,
+                    format!("Couldn't upload chunk for this reason: `{}`, path being written to: `{:?}`", e, dirpath.join(&filename).to_str()),
+                ),
+            };
+        }
+    }
+
+    (
+        StatusCode::BAD_REQUEST,
+        "Received request to upload, but couldn't start receiving data?..".to_owned(),
+    )
+}
+
+// TODO: Save coordinator's state to a JSON so that it remembers its state between sessions
+pub struct FileCoordinator {
+    pub storage_prefix: String,
+    pub list: HashMap<Uuid, Vec<String>>,
+}
+
+impl FileCoordinator {
+    pub fn new_async() -> Arc<RwLock<Self>> {
+        Arc::new(RwLock::new(Self {
+            storage_prefix: "files".to_owned(),
+            list: HashMap::new(),
+        }))
+    }
+}
+
+type Files = Arc<RwLock<FileCoordinator>>;
 
 #[derive(Debug, Serialize, Clone)]
 struct Todo {
