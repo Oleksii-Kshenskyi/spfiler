@@ -7,7 +7,8 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use serde_json::json;
+use tracing::{info, warn};
 
 use std::{
     collections::HashMap,
@@ -20,6 +21,8 @@ use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
 
+const SAVE_FILE_NAME: &'static str = "filerstate.json";
+
 // TODO: Develop an actual client app so that you don't have to send all requests via curl.
 
 #[tokio::main]
@@ -31,6 +34,20 @@ async fn main() {
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
+
+    let saved_files: FileCoordinator = match tokio::fs::read_to_string(SAVE_FILE_NAME).await {
+        Ok(maybe_files) => match serde_json::from_str(&maybe_files) {
+            Ok(files) => files,
+            Err(e) => {
+                warn!("Couldn't use {}'s contents to restore filer's storage to its last valid state: {}. Check the {} file, it may be corrupted.", SAVE_FILE_NAME, e, SAVE_FILE_NAME);
+                FileCoordinator::new()
+            }
+        },
+        Err(e) => {
+            warn!("Couldn't open {} to load previous filer state. This installation may be new. Creating a new filer structure. Error is: {}", SAVE_FILE_NAME, e);
+            FileCoordinator::new()
+        }
+    };
 
     // Compose the routes
     // TODO: Download functionality
@@ -60,7 +77,7 @@ async fn main() {
                 .layer(TraceLayer::new_for_http())
                 .into_inner(),
         )
-        .with_state(FileCoordinator::new_async());
+        .with_state(FileCoordinator::from_existing(saved_files));
 
     let listener = tokio::net::TcpListener::bind("192.168.50.116:80")
         .await
@@ -75,14 +92,18 @@ pub struct ExitResponse {
     response: String,
 }
 
-fn do_exit() {
+async fn do_exit(files: Arc<RwLock<FileCoordinator>>) {
+    let filename = SAVE_FILE_NAME.to_string();
+    let data = json!(&*files.read().unwrap()).to_string();
+    tokio::fs::write(filename, data).await.unwrap();
+
     std::thread::sleep(Duration::from_millis(300));
     std::process::exit(0);
 }
 
-async fn exit_app() -> impl IntoResponse {
+async fn exit_app(State(files): State<Files>) -> impl IntoResponse {
     tokio::spawn(async move {
-        do_exit();
+        do_exit(files.clone()).await;
     });
     (
         StatusCode::OK,
@@ -134,7 +155,7 @@ async fn list_files(
             }),
         ),
         Some(file_vec) => (
-            StatusCode::BAD_REQUEST,
+            StatusCode::OK,
             Json(ListFilesResponse {
                 message: format!("Found files for id {}!", registered_id.to_string()),
                 files: Some(file_vec),
@@ -195,6 +216,7 @@ async fn upload_file(
 }
 
 // TODO: Save coordinator's state to a JSON so that it remembers its state between sessions
+#[derive(Serialize, Deserialize, Debug)]
 pub struct FileCoordinator {
     pub storage_prefix: String,
     pub list: HashMap<Uuid, Vec<String>>,
@@ -202,10 +224,18 @@ pub struct FileCoordinator {
 
 impl FileCoordinator {
     pub fn new_async() -> Arc<RwLock<Self>> {
-        Arc::new(RwLock::new(Self {
+        Arc::new(RwLock::new(Self::new()))
+    }
+
+    pub fn new() -> Self {
+        Self {
             storage_prefix: "files".to_owned(),
             list: HashMap::new(),
-        }))
+        }
+    }
+
+    pub fn from_existing(saved_files: FileCoordinator) -> Arc<RwLock<Self>> {
+        Arc::new(RwLock::new(saved_files))
     }
 }
 
