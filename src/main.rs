@@ -215,7 +215,6 @@ async fn upload_file(
     )
 }
 
-// TODO: Save coordinator's state to a JSON so that it remembers its state between sessions
 #[derive(Serialize, Deserialize, Debug)]
 pub struct FileCoordinator {
     pub storage_prefix: String,
