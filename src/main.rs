@@ -1,11 +1,16 @@
 use axum::{
+    body::Body,
     error_handling::HandleErrorLayer,
     extract::{DefaultBodyLimit, Multipart, Path, State},
-    http::StatusCode,
-    response::IntoResponse,
+    http::{header::CONTENT_DISPOSITION, StatusCode},
+    response::{AppendHeaders, IntoResponse},
     routing::{get, post},
     Json, Router,
 };
+
+use tokio::fs::File;
+use tokio_util::codec::{BytesCodec, FramedRead};
+
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, warn};
@@ -50,7 +55,6 @@ async fn main() {
     };
 
     // Compose the routes
-    // TODO: Download functionality
     // TODO: Deleting files from ID
     // TODO: Secure downloads/uploads via HTTPS protocol
     let app = Router::new()
@@ -58,6 +62,7 @@ async fn main() {
         .route("/register", get(register_id))
         .route("/list/:registered_id", get(list_files))
         .route("/upload/:id/:filename", post(upload_file))
+        .route("/download/:id/:filename", get(download_file))
         // Add middleware to all routes
         .layer(DefaultBodyLimit::disable())
         .layer(RequestBodyLimitLayer::new(1 * 1024 * 1024 * 1024))
@@ -213,6 +218,50 @@ async fn upload_file(
         StatusCode::BAD_REQUEST,
         "Received request to upload, but couldn't start receiving data?..".to_owned(),
     )
+}
+
+
+// FIXME: For some reason, after downloading a file (either locally on the Windows host or on the Linux VM), the file becomes corrupted. It seems like it's missing the first hundreds or so bytes of data, or maybe has a hundred bytes more than necessary. Try to figure out why this doens't exactly work. P.S. the upload seems to function well. (although upload should also be tested by uploading from the VM to the host)
+async fn download_file(
+    Path((id, filename)): Path<(Uuid, String)>,
+    State(files): State<Files>,
+) -> impl IntoResponse {
+    let maybe_maybe_file = files.read().unwrap().list.get(&id).cloned()
+    .map(|v| v.iter().find(|f| **f == filename).cloned());
+    match maybe_maybe_file {
+        None => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Specified ID does not exist.".to_owned(),
+            ));
+        }
+        Some(maybe_file) => match maybe_file {
+            None => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "File not found within this ID.".to_owned(),
+                ))
+            }
+            Some(fname) => {
+                let path = P::new(&files.read().unwrap().storage_prefix)
+                    .join(id.to_string())
+                    .join(&fname)
+                    .to_owned();
+
+                match File::open(path).await {
+                        Ok(file) => {
+                            let stream = FramedRead::new(file, BytesCodec::new());
+                            let body = Body::from_stream(stream);
+
+                            return Ok((StatusCode::OK, AppendHeaders([
+                                (CONTENT_DISPOSITION, format!("attachment; filename=\"{}\"", fname))
+                            ]), body));
+                        },
+                        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("ERROR: file is present in the server state, but is not physically there. Something went horribly wrong. The server state is corrupted?.. The error returned is: {}", e))),
+                    }
+                }
+            }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
