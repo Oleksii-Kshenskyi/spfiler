@@ -1,3 +1,5 @@
+mod data;
+
 use axum::{
     body::Body,
     error_handling::HandleErrorLayer,
@@ -26,7 +28,15 @@ use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
 
+use crate::data::*;
+
 const SAVE_FILE_NAME: &'static str = "filerstate.json";
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct FileCoordinator {
+    pub storage_prefix: String,
+    pub list: HashMap<Uuid, Vec<String>>,
+}
 
 // TODO: Develop an actual client app so that you don't have to send all requests via curl.
 
@@ -91,12 +101,6 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
-// The query for exiting the app
-pub struct ExitResponse {
-    response: String,
-}
-
 async fn do_exit(files: Arc<RwLock<FileCoordinator>>) {
     let filename = SAVE_FILE_NAME.to_string();
     let data = json!(&*files.read().unwrap()).to_string();
@@ -118,26 +122,14 @@ async fn exit_app(State(files): State<Files>) -> impl IntoResponse {
     )
 }
 
-#[derive(Serialize, Debug)]
-pub struct RegisteredResponse {
-    pub id: String,
-    pub message: String,
-}
-
 async fn register_id(State(files): State<Files>) -> impl IntoResponse {
     let registered_id = Uuid::new_v4();
     files.write().unwrap().list.insert(registered_id, vec![]);
 
     (StatusCode::CREATED, Json(RegisteredResponse {
-        id: registered_id.to_string(),
+        id: registered_id,
         message: "Your new file sharing ID has been registered! Do NOT lose this ID, it is your key to sharing files via this app!".to_owned(),
     }))
-}
-
-#[derive(Deserialize, Serialize, Debug)]
-pub struct ListFilesResponse {
-    message: String,
-    files: Option<Vec<String>>,
 }
 
 async fn list_files(
@@ -220,14 +212,18 @@ async fn upload_file(
     )
 }
 
-
 // FIXME: For some reason, after downloading a file (either locally on the Windows host or on the Linux VM), the file becomes corrupted. It seems like it's missing the first hundreds or so bytes of data, or maybe has a hundred bytes more than necessary. Try to figure out why this doens't exactly work. P.S. the upload seems to function well. (although upload should also be tested by uploading from the VM to the host)
 async fn download_file(
     Path((id, filename)): Path<(Uuid, String)>,
     State(files): State<Files>,
 ) -> impl IntoResponse {
-    let maybe_maybe_file = files.read().unwrap().list.get(&id).cloned()
-    .map(|v| v.iter().find(|f| **f == filename).cloned());
+    let maybe_maybe_file = files
+        .read()
+        .unwrap()
+        .list
+        .get(&id)
+        .cloned()
+        .map(|v| v.iter().find(|f| **f == filename).cloned());
     match maybe_maybe_file {
         None => {
             return Err((
@@ -259,15 +255,9 @@ async fn download_file(
                         },
                         Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("ERROR: file is present in the server state, but is not physically there. Something went horribly wrong. The server state is corrupted?.. The error returned is: {}", e))),
                     }
-                }
             }
+        },
     }
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct FileCoordinator {
-    pub storage_prefix: String,
-    pub list: HashMap<Uuid, Vec<String>>,
 }
 
 impl FileCoordinator {
@@ -288,10 +278,3 @@ impl FileCoordinator {
 }
 
 type Files = Arc<RwLock<FileCoordinator>>;
-
-#[derive(Debug, Serialize, Clone)]
-struct Todo {
-    id: Uuid,
-    text: String,
-    completed: bool,
-}
