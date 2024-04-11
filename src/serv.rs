@@ -176,8 +176,8 @@ async fn upload_file(
             "ERROR: No such ID has been registered, can't upload any files!".to_owned(),
         );
     }
-
     while let Some(field) = mp.next_field().await.unwrap() {
+        dbg!(&field);
         let prefix = files.read().unwrap().storage_prefix.clone();
         let name = field.name().unwrap().to_string();
         let filename_async = field.file_name().unwrap().to_string();
