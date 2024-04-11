@@ -1,19 +1,15 @@
 mod data;
 
-use axum::http::{HeaderMap, HeaderValue};
-use reqwest::{
-    header::{CONTENT_DISPOSITION, CONTENT_TYPE, SERVER},
-    Client,
-};
-use serde::{Deserialize, Serialize};
+use reqwest::Client;
+// use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use std::path::Path;
 
 use crate::data::*;
 
-pub const SERVER_ADDRESS: &'static str = "http://192.168.50.116:80";
-pub const UPLOAD_FILE_NAME_TEMP: &'static str = "C:/s.zip";
+pub const SERVER_ADDRESS: &str = "http://192.168.50.116:80";
+pub const UPLOAD_FILE_NAME_TEMP: &str = "C:/s.zip";
 
 #[tokio::main]
 async fn main() -> Result<(), reqwest::Error> {
@@ -43,12 +39,12 @@ async fn register() -> Result<Uuid, reqwest::Error> {
 }
 
 async fn list(id: &Uuid) -> Result<ListFilesResponse, reqwest::Error> {
-    Ok(Client::new()
-        .get(format!("{}/list/{}", SERVER_ADDRESS, id.to_string()))
+    Client::new()
+        .get(format!("{}/list/{}", SERVER_ADDRESS, id))
         .send()
         .await?
         .json::<ListFilesResponse>()
-        .await?)
+        .await
 }
 
 async fn upload(filename: &str, id: &Uuid) -> Result<String, reqwest::Error> {
@@ -59,26 +55,18 @@ async fn upload(filename: &str, id: &Uuid) -> Result<String, reqwest::Error> {
         .unwrap()
         .to_owned();
     let the_file = tokio::fs::read(filename).await.unwrap();
-    let mut header_map = HeaderMap::new();
-    header_map.insert(
-        CONTENT_TYPE,
-        HeaderValue::from_str("multipart/form-data").unwrap(),
-    );
-    header_map.insert(
-        CONTENT_DISPOSITION,
-        HeaderValue::from_str(&format!("attachment; filename={}", url_filename)).unwrap(),
-    );
+
     let file_part = reqwest::multipart::Part::bytes(the_file)
-        .file_name(url_filename.clone())
-        .headers(header_map);
+        .file_name(url_filename.clone());
+
     let form = reqwest::multipart::Form::new()
-        .text("filename", url_filename.clone())
-        .part("multipart", file_part);
+        .part("file", file_part);
+
     let message = Client::new()
         .post(format!(
             "{}/upload/{}/{}",
             SERVER_ADDRESS,
-            id.to_string(),
+            id,
             &url_filename
         ))
         .multipart(form)

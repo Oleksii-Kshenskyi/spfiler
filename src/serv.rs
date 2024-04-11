@@ -15,7 +15,7 @@ use tokio_util::codec::{BytesCodec, FramedRead};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tracing::{info, warn};
+use tracing::warn;
 
 use std::{
     collections::HashMap,
@@ -30,7 +30,7 @@ use uuid::Uuid;
 
 use crate::data::*;
 
-const SAVE_FILE_NAME: &'static str = "filerstate.json";
+const SAVE_FILE_NAME: &str = "filerstate.json";
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct FileCoordinator {
@@ -45,7 +45,7 @@ async fn main() {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "spfiler=debug,tower_http=debug".into()),
+                .unwrap_or_else(|_| "spfserv=debug,tower_http=debug".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -55,12 +55,12 @@ async fn main() {
             Ok(files) => files,
             Err(e) => {
                 warn!("Couldn't use {}'s contents to restore filer's storage to its last valid state: {}. Check the {} file, it may be corrupted.", SAVE_FILE_NAME, e, SAVE_FILE_NAME);
-                FileCoordinator::new()
+                FileCoordinator::default()
             }
         },
         Err(e) => {
             warn!("Couldn't open {} to load previous filer state. This installation may be new. Creating a new filer structure. Error is: {}", SAVE_FILE_NAME, e);
-            FileCoordinator::new()
+            FileCoordinator::default()
         }
     };
 
@@ -75,7 +75,7 @@ async fn main() {
         .route("/download/:id/:filename", get(download_file))
         // Add middleware to all routes
         .layer(DefaultBodyLimit::disable())
-        .layer(RequestBodyLimitLayer::new(1 * 1024 * 1024 * 1024))
+        .layer(RequestBodyLimitLayer::new(1024 * 1024 * 1024))
         .layer(
             ServiceBuilder::new()
                 .layer(HandleErrorLayer::new(|error: BoxError| async move {
@@ -141,7 +141,7 @@ async fn list_files(
         .unwrap()
         .list
         .get(&registered_id)
-        .map(|o| o.clone());
+        .cloned();
 
     match maybe_files {
         None => (
@@ -154,7 +154,7 @@ async fn list_files(
         Some(file_vec) => (
             StatusCode::OK,
             Json(ListFilesResponse {
-                message: format!("Found files for id {}!", registered_id.to_string()),
+                message: format!("Found files for id {}!", registered_id),
                 files: Some(file_vec),
             }),
         ),
@@ -177,16 +177,14 @@ async fn upload_file(
         );
     }
     while let Some(field) = mp.next_field().await.unwrap() {
-        dbg!(&field);
         let prefix = files.read().unwrap().storage_prefix.clone();
         let name = field.name().unwrap().to_string();
         let filename_async = field.file_name().unwrap().to_string();
 
-        if name == "filename".to_string() && filename_async == filename {
-            info!("UPLOADING: prefix: `{}`, name: `{}`, filename in field: `{}`, filename in request: `{}`.", &prefix, &name, &filename_async, &filename);
+        if name == *"file" && filename_async == filename {
             let data = field.bytes().await.unwrap();
 
-            let dirpath = P::new(&prefix).join(&id.to_string());
+            let dirpath = P::new(&prefix).join(id.to_string());
             if !tokio::fs::try_exists(&dirpath).await.unwrap() {
                 tokio::fs::create_dir_all(&dirpath).await.unwrap();
             }
@@ -226,14 +224,14 @@ async fn download_file(
         .map(|v| v.iter().find(|f| **f == filename).cloned());
     match maybe_maybe_file {
         None => {
-            return Err((
+            Err((
                 StatusCode::BAD_REQUEST,
                 "Specified ID does not exist.".to_owned(),
-            ));
+            ))
         }
         Some(maybe_file) => match maybe_file {
             None => {
-                return Err((
+                Err((
                     StatusCode::BAD_REQUEST,
                     "File not found within this ID.".to_owned(),
                 ))
@@ -249,11 +247,11 @@ async fn download_file(
                             let stream = FramedRead::new(file, BytesCodec::new());
                             let body = Body::from_stream(stream);
 
-                            return Ok((StatusCode::OK, AppendHeaders([
+                            Ok((StatusCode::OK, AppendHeaders([
                                 (CONTENT_DISPOSITION, format!("attachment; filename=\"{}\"", fname))
-                            ]), body));
+                            ]), body))
                         },
-                        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("ERROR: file is present in the server state, but is not physically there. Something went horribly wrong. The server state is corrupted?.. The error returned is: {}", e))),
+                        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("ERROR: file is present in the server state, but is not physically there. Something went horribly wrong. The server state is corrupted?.. The error returned is: {}", e))),
                     }
             }
         },
@@ -274,6 +272,12 @@ impl FileCoordinator {
 
     pub fn from_existing(saved_files: FileCoordinator) -> Arc<RwLock<Self>> {
         Arc::new(RwLock::new(saved_files))
+    }
+}
+
+impl Default for FileCoordinator {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

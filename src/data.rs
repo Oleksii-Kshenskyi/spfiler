@@ -1,5 +1,3 @@
-use std::io;
-
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -14,13 +12,13 @@ impl std::fmt::Display for ListFilesResponse {
         match &self.files {
             None => write!(f, "WHOOPS: Server doesn't know this ID!"),
             Some(vec) => {
-                write!(f, "FILES:\n")?;
+                writeln!(f, "FILES:")?;
                 if vec.is_empty() {
-                    write!(f, "- <EMPTY>\n")?;
+                    writeln!(f, "- <EMPTY>")?;
                     return Ok(());
                 }
                 for name in vec {
-                    write!(f, "- `{}`;", name)?;
+                    writeln!(f, "- `{}`;", name)?;
                 }
                 Ok(())
             }
